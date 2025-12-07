@@ -14,15 +14,17 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Setup Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10' # Upgraded to fix Google warning
 
       - name: Install Libraries
         run: pip install -r requirements.txt
 
       - name: Run The News Agent
         env:
+          # We must pass the keys here so the script can see them
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} 
         run: python main.py
