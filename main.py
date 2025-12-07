@@ -4,39 +4,18 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
+import google.generativeai as genai
+import json
+import time
 
 # =====================================================
 # CONFIGURATION
 # =====================================================
-RECEIVER_EMAIL = "iammunna32@gmail.com" 
+RECEIVER_EMAIL = "iammunna32@gmail.com"  # <--- CHANGE THIS
 # =====================================================
 
-SOURCES = [
-    # Top 10 from Opinion
-    {"url": "https://www.prothomalo.com/opinion", "limit": 10, "type": "OPINION"},
-    # Top 3 from Editorial
-    {"url": "https://www.prothomalo.com/opinion/editorial", "limit": 3, "type": "EDITORIAL"}
-]
-
-def send_email(subject, body):
-    try:
-        sender_email = os.environ["EMAIL_USER"]
-        sender_pass = os.environ["EMAIL_PASS"]
-        
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = RECEIVER_EMAIL
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
-        
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender_email, sender_pass)
-        server.sendmail(sender_email, RECEIVER_EMAIL, msg.as_string())
-        server.quit()
-        print(">>> SUCCESS: Email Sent.")
-    except Exception as e:
-        print(f">>> ERROR: Email failed. {e}")
+# Initialize Gemini
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 
 def get_soup(url):
     headers = {
@@ -49,89 +28,145 @@ def get_soup(url):
     except:
         return None
 
-def extract_text_brute_force(url):
-    """ Grabs text even if layout is weird """
-    soup = get_soup(url)
-    if not soup: return "Link broken or inaccessible."
-
-    # 1. Get Headline
-    h1 = soup.find('h1')
-    title = h1.get_text().strip() if h1 else "Unknown Headline"
-
-    # 2. BRUTE FORCE TEXT EXTRACTION
-    # We grab ALL paragraphs in the document
-    paragraphs = soup.find_all('p')
+def ask_ai_to_filter_links(links_list, limit):
+    """
+    Sends the raw list of links to Gemini and asks it to pick the real news.
+    """
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
+    # We create a prompt that feeds the raw data to the AI
+    prompt = f"""
+    I have a list of links from the Prothom Alo Opinion page. 
+    I need you to identify the ACTUAL news articles / opinion pieces.
+    Ignore links to 'Login', 'Facebook', 'Twitter', 'Collections', 'Images', or 'Ads'.
+    
+    Return exactly {limit} links that seem to be the most recent/important articles.
+    
+    Return ONLY a valid JSON list of strings (URLs). Do not write any other text.
+    
+    Here is the list:
+    {json.dumps(links_list)}
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        # Clean up response (sometimes AI adds markdown backticks)
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean_text)
+    except Exception as e:
+        print(f"AI Brain Error: {e}")
+        return []
+
+def extract_content(url):
+    """
+    Visits the chosen URL and grabs text.
+    """
+    soup = get_soup(url)
+    if not soup: return "Error loading page."
+    
+    # 1. Title
+    h1 = soup.find('h1')
+    title = h1.get_text().strip() if h1 else "Unknown Title"
+    
+    # 2. Body - Brute Force Paragraph Collection
+    # This grabs all text, preventing layout issues
+    paragraphs = soup.find_all('p')
     clean_text = []
     for p in paragraphs:
-        text = p.get_text().strip()
-        # Filter: Only keep sentences (longer than 40 chars) to avoid menus/footer junk
-        if len(text) > 40:
-            clean_text.append(text)
+        t = p.get_text().strip()
+        # Filter junk: simple heuristic, sentences > 40 chars
+        if len(t) > 40:
+            clean_text.append(t)
             
     full_body = "\n\n".join(clean_text)
+    if not full_body: full_body = "Could not extract text. Click link to read."
     
-    if len(full_body) < 100:
-        full_body = "Could not auto-copy text. Please click the link to read."
-        
     return title, full_body
 
-def run_agent():
-    print("Agent Started...")
-    collected_items = []
+def run_smart_agent():
+    print("Agent Started (AI Powered)...")
+    final_email_data = []
     seen_urls = set()
-
-    for source in SOURCES:
-        soup = get_soup(source['url'])
-        if not soup:
-            collected_items.append({"type": "ERROR", "title": f"Could not load {source['url']}", "link": source['url'], "body": ""})
-            continue
-
-        all_links = soup.find_all('a', href=True)
-        count = 0
-        
-        for link in all_links:
-            if count >= source['limit']: break
-            href = link['href']
-            
-            # --- FILTERS ---
-            # 1. Must be opinion section
-            # 2. Must NOT be 'collection' (garbage) or 'auth' (login)
-            if "/opinion/" in href and "collection" not in href and "auth" not in href:
-                
-                full_link = "https://www.prothomalo.com" + href if not href.startswith('http') else href
-                
-                if full_link not in seen_urls:
-                    print(f"Reading: {full_link}")
-                    # Go get the text
-                    title, body = extract_text_brute_force(full_link)
-                    
-                    collected_items.append({
-                        "type": source['type'],
-                        "title": title,
-                        "link": full_link,
-                        "body": body
-                    })
-                    seen_urls.add(full_link)
-                    count += 1
-
-    # --- FINAL EMAIL GENERATION ---
-    if collected_items:
-        email_body = f"Daily News Report ({len(collected_items)} Items)\n"
-        email_body += "="*50 + "\n\n"
-
-        for item in collected_items:
-            email_body += f"[{item['type']}] {item['title']}\n"
-            email_body += f"LINK: {item['link']}\n"
-            email_body += "-"*30 + "\n"
-            email_body += item['body'][:4000] # Limit to 4000 chars per article
-            email_body += "\n\n" + "="*50 + "\n\n"
-        
-        send_email(f"Daily News: {len(collected_items)} Articles", email_body)
     
+    sender_email = os.environ["EMAIL_USER"]
+    sender_pass = os.environ["EMAIL_PASS"]
+
+    sources = [
+        {"url": "https://www.prothomalo.com/opinion", "limit": 10, "type": "OPINION"},
+        {"url": "https://www.prothomalo.com/opinion/editorial", "limit": 3, "type": "EDITORIAL"}
+    ]
+
+    for source in sources:
+        print(f"Scanning {source['type']}...")
+        soup = get_soup(source['url'])
+        if not soup: continue
+
+        # 1. Harvest ALL links on the page
+        raw_links = []
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            text = a.get_text().strip()
+            
+            # Basic pre-cleaning to save AI tokens (remove obvious junk)
+            if len(text) > 5 and "http" not in href and "login" not in href:
+                full_link = "https://www.prothomalo.com" + href if not href.startswith('http') else href
+                raw_links.append({"text": text, "url": full_link})
+        
+        # 2. Ask Gemini to pick the winners
+        # We slice raw_links[:60] to avoid sending too much data, sending top 60 links is enough to find top 10 news
+        print("Asking Gemini to identify news...")
+        ai_selected_urls = ask_ai_to_filter_links(raw_links[:60], source['limit'])
+        
+        print(f"Gemini selected {len(ai_selected_urls)} articles.")
+
+        # 3. Process the chosen ones
+        for link in ai_selected_urls:
+            # AI sometimes returns just the relative path, fix it
+            if not link.startswith("http"):
+                link = "https://www.prothomalo.com" + link
+
+            if link not in seen_urls:
+                print(f"Reading: {link}")
+                title, body = extract_content(link)
+                
+                final_email_data.append({
+                    "type": source['type'],
+                    "title": title,
+                    "link": link,
+                    "body": body
+                })
+                seen_urls.add(link)
+
+    # --- SEND EMAIL ---
+    if final_email_data:
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = RECEIVER_EMAIL
+        msg['Subject'] = f"AI Daily News ({len(final_email_data)} Articles)"
+
+        body_str = f"Your AI Agent collected {len(final_email_data)} articles:\n"
+        body_str += "="*50 + "\n\n"
+
+        for item in final_email_data:
+            body_str += f"[{item['type']}] {item['title']}\n"
+            body_str += f"LINK: {item['link']}\n"
+            body_str += "-"*20 + "\n"
+            body_str += item['body'][:4000]
+            body_str += "\n\n" + "="*50 + "\n\n"
+
+        msg.attach(MIMEText(body_str, 'plain', 'utf-8'))
+
+        try:
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login(sender_email, sender_pass)
+            server.sendmail(sender_email, RECEIVER_EMAIL, msg.as_string())
+            server.quit()
+            print(">>> SUCCESS: Email Sent.")
+        except Exception as e:
+            print(f">>> ERROR: {e}")
     else:
-        # If nothing found, send a failure report so you know it ran
-        send_email("Agent Report: 0 Articles Found", "I scanned the website but found no valid links matching the criteria. The website layout might be completely different.")
+        print("AI could not find any valid news.")
 
 if __name__ == "__main__":
-    run_agent()
+    run_smart_agent()
