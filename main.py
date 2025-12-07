@@ -4,7 +4,6 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
-import time
 
 # =====================================================
 # CONFIGURATION
@@ -12,18 +11,20 @@ import time
 RECEIVER_EMAIL = "iammunna32@gmail.com"  # <--- CHANGE THIS
 # =====================================================
 
-# The two sources you want to track
 SOURCES = [
-    {"name": "Opinion (Mitamot)", "url": "https://www.prothomalo.com/opinion"},
-    {"name": "Editorial (Sompadokiyo)", "url": "https://www.prothomalo.com/opinion/editorial"}
+    {"name": "Mitamot (Opinion)", "url": "https://www.prothomalo.com/opinion"},
+    {"name": "Sompadokiyo (Editorial)", "url": "https://www.prothomalo.com/opinion/editorial"}
 ]
 
 def get_soup(url):
-    """Helper function to download a page and make it readable"""
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    # We pretend to be a real browser so they don't block us
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8'
+    }
     try:
         response = requests.get(url, headers=headers)
-        response.encoding = 'utf-8' # Force Bengali text support
+        response.encoding = 'utf-8'
         if response.status_code == 200:
             return BeautifulSoup(response.content, 'html.parser')
     except Exception as e:
@@ -31,40 +32,40 @@ def get_soup(url):
     return None
 
 def extract_article_text(article_link):
-    """Goes to the specific article link and copies the text"""
     soup = get_soup(article_link)
     if not soup: return "Could not read article."
 
-    # Try to find the main content area
+    # Strategy: Find the biggest chunk of text
+    # 1. Try standard story content div
     content_div = soup.find('div', class_='story-content')
-    if not content_div:
-        content_div = soup.find('div', class_='story-element')
     
-    # If specific div not found, fall back to the whole body (messier but safer)
+    # 2. Try generic article tag
     if not content_div:
-        content_div = soup
+        content_div = soup.find('article')
         
-    paragraphs = content_div.find_all('p')
-    # Filter: Keep paragraphs longer than 30 chars to avoid ads/menu items
-    valid_text = [p.get_text().strip() for p in paragraphs if len(p.get_text()) > 30]
+    # 3. If generic, grab all paragraphs
+    if content_div:
+        paragraphs = content_div.find_all('p')
+        # Only keep paragraphs that look like sentences (more than 20 chars)
+        valid_text = [p.get_text().strip() for p in paragraphs if len(p.get_text()) > 20]
+        full_text = "\n\n".join(valid_text)
+        return full_text if full_text else "Content is hidden or requires login."
     
-    return "\n\n".join(valid_text)
+    return "Could not extract text structure."
 
 def run_agent():
     print("Agent Started...")
     collected_news = []
-    seen_links = set() # To prevent duplicates if the same news is on both pages
+    seen_links = set() 
 
     sender_email = os.environ["EMAIL_USER"]
     sender_pass = os.environ["EMAIL_PASS"]
 
-    # --- LOOP THROUGH SOURCES ---
     for source in SOURCES:
-        print(f"Checking: {source['name']}...")
+        print(f"Checking source: {source['name']}...")
         soup = get_soup(source['url'])
         
         if soup:
-            # Find the first valid article link
             all_links = soup.find_all('a', href=True)
             found_link = None
             found_title = None
@@ -73,50 +74,50 @@ def run_agent():
                 href = link['href']
                 text = link.get_text().strip()
                 
-                # Logic: Must contain /opinion/, must be long (an article), and not be a section header
-                if "/opinion/" in href and len(href) > 30 and text:
+                # --- THE FIX IS HERE ---
+                # 1. Must contain /opinion/
+                # 2. Must NOT contain 'auth', 'api', 'login' (The Login Filter)
+                # 3. Text must be long enough to be a headline
+                if "/opinion/" in href and "auth" not in href and "api" not in href and len(text) > 5:
+                    
                     full_link = "https://www.prothomalo.com" + href if not href.startswith('http') else href
                     
-                    # Check if we already found this link in the previous source
+                    # Double check we haven't seen this
                     if full_link not in seen_links:
                         found_link = full_link
                         found_title = text
                         seen_links.add(full_link)
-                        break # Stop after finding the top story
+                        break # Stop at the first valid news link
             
             if found_link:
-                print(f"Found Article: {found_title}")
+                print(f"Found: {found_title}")
                 text_content = extract_article_text(found_link)
                 
-                # Add to our collection
                 collected_news.append({
                     "source": source['name'],
                     "title": found_title,
                     "link": found_link,
                     "body": text_content
                 })
-            else:
-                print(f"No new link found for {source['name']}")
 
-    # --- SEND EMAIL ---
+    # Send Email if news found
     if collected_news:
         msg = MIMEMultipart()
         msg['From'] = sender_email
         msg['To'] = RECEIVER_EMAIL
-        msg['Subject'] = f"Daily Briefing: {len(collected_news)} Articles Found"
+        msg['Subject'] = f"Daily Briefing: {len(collected_news)} Articles"
 
-        # Construct Email Body
-        email_body = "Here is today's opinion and editorial collection:\n"
-        email_body += "="*40 + "\n\n"
+        email_body = "Today's Prothom Alo Collection:\n"
+        email_body += "="*30 + "\n\n"
 
         for news in collected_news:
-            email_body += f"SOURCE: {news['source']}\n"
+            email_body += f"SECTION: {news['source']}\n"
             email_body += f"HEADLINE: {news['title']}\n"
             email_body += f"LINK: {news['link']}\n"
-            email_body += "-"*20 + "\n"
-            email_body += news['body'][:3000] # Limit text to first 3000 chars to prevent email cutoff
+            email_body += "-"*10 + "\n"
+            email_body += news['body'][:4000] # Cap length to avoid errors
             email_body += "\n\n[...Read full article at link...]\n"
-            email_body += "="*40 + "\n\n"
+            email_body += "="*30 + "\n\n"
 
         msg.attach(MIMEText(email_body, 'plain', 'utf-8'))
 
@@ -126,11 +127,11 @@ def run_agent():
             server.login(sender_email, sender_pass)
             server.sendmail(sender_email, RECEIVER_EMAIL, msg.as_string())
             server.quit()
-            print(">>> SUCCESS: Combined email sent!")
+            print(">>> SUCCESS: Email sent!")
         except Exception as e:
-            print(f">>> ERROR: Could not send email. {e}")
+            print(f">>> ERROR: {e}")
     else:
-        print("No articles were successfully scraped from either source.")
+        print("No valid articles found (Login filter blocked bad links).")
 
 if __name__ == "__main__":
     run_agent()
