@@ -9,7 +9,7 @@ import datetime
 # =====================================================
 # SETTINGS: CHANGE THE EMAIL BELOW
 # =====================================================
-RECEIVER_EMAIL = "put_the_other_person_email@gmail.com"  # <--- CHANGE THIS!
+RECEIVER_EMAIL = "iammunna32@gmail.com"  # <--- CHANGE THIS!
 # =====================================================
 
 URL = "https://en.prothomalo.com/opinion/editorial"
